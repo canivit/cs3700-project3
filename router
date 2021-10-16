@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
-import argparse, socket, time, json, select, struct, math
+import argparse, socket, json, select, copy
 
-#DEBUG = True
-DEBUG = False
+DEBUG = True
+#DEBUG = False
 
 parser = argparse.ArgumentParser(description='route packets')
 parser.add_argument('asn', type=int, help="AS Number")
@@ -49,7 +49,8 @@ class Router:
     relations = None
     sockets = None
 
-    def __init__(self, networks):
+    def __init__(self, asn, networks):
+        self.asn = asn
         self.routes = []
         self.updates = []
         self.relations = {}
@@ -120,9 +121,35 @@ class Router:
             routes = self.filter_relationships(srcif, routes)
         return self.sockets[peer] if peer else None
 
+    def apply_subnetmask(self, destination, netmask):
+        """	applies the subnet mask to the destination ip """
+        destination_segments = destination.split('.')
+        netmask_segments = netmask.split('.')
+        ip = ''
+        for i in range(len(netmask_segments)):
+            ip_segment = int(destination_segments[i])
+            mask_segment = int(netmask_segments[i])
+            new_segment = ip_segment & mask_segment
+            ip = ip + str(new_segment) + '.'
+        ip = ip[0:-1]
+        return ip
+
     def forward(self, srcif, packet):
         """	Forward a data packet	"""
-        # TODO
+        # check every row in the routing table
+        for row in self.routes:
+            # apply the subnetmask to the destination ip
+            ip = self.apply_subnetmask(packet[DEST], row[NMSK])
+            # if we know which neighbor to forward this packet to
+            if ip == row[NTWK]:
+                # get the neighbor ip
+                neighbor = row[PEER]
+                # get the socket for this neighbor
+                socket = self.sockets[neighbor]
+                socket.send(json.dumps(packet).encode())
+                if DEBUG:
+                    print('FORWARD TO %s: %s' % (neighbor, packet))
+                return True
         return False
 
     def coalesce(self):
@@ -130,10 +157,37 @@ class Router:
         # TODO (this is the most difficult task, save until last)
         return False
 
+    def get_router_ip(self, ip):
+        return ip[0:-1] + '1'
+
     def update(self, srcif, packet):
         """	handle update packets	"""
-        # TODO 
-        return False
+        
+        # save it for later use
+        self.updates.append(packet) 
+
+        # update the routing table
+        row = copy.deepcopy(packet[MESG])
+        row[PEER] = packet[SRCE]
+        self.routes.append(row)
+
+        # send copies of the announcement to neighboring routers
+        neighbors = self.sockets.keys()
+        for neighbor in neighbors:
+            # dont't send an announcement to the neighbor who sent this to us          
+            if(neighbor != packet[SRCE]):
+                cp = copy.deepcopy(packet)
+                # change the source and destination fields
+                cp[SRCE] = self.get_router_ip(neighbor)
+                cp[DEST] = neighbor
+                # append ourselves to the ASPath
+                cp[MESG][APTH].append(self.asn)
+                socket = self.sockets[neighbor]
+                socket.send(json.dumps(cp).encode())
+                if DEBUG:
+                    print('ANNOUNCE UPDATE TO %s: %s' % (neighbor ,cp))
+
+        return True
     
     def revoke(self, packet):
         """	handle revoke packets	"""
@@ -142,12 +196,38 @@ class Router:
 
     def dump(self, packet):
         """	handles dump table requests	"""
-        # TODO
+        table_message = {}
+        table_message[SRCE] = packet[DEST]
+        table_message[DEST] = packet[SRCE]
+        table_message[TYPE] = TABL
+        table = []
+        for row in self.routes:
+            table_row = {}
+            table_row[NTWK] = row[NTWK]
+            table_row[NMSK] = row[NMSK]
+            table_row[PEER] = row[PEER]
+            table.append(table_row)
+        table_message[MESG] = table
+        socket = self.sockets[packet[SRCE]]
+        socket.send(json.dumps(table_message).encode())
+        if DEBUG:
+            print('SEND TABLE: %s' % table_message)
         return True
 
     def handle_packet(self, srcif, packet):
         """	dispatches a packet """
-        # TODO
+        if DEBUG:
+            print('RECEIVED: %s' % packet)
+        
+        type = packet[TYPE]
+        # if this packet is route update message
+        if type == UPDT:
+            return self.update(srcif, packet)
+        elif type == DATA:
+            return self.forward(srcif, packet)
+        elif type == DUMP:
+            return self.dump(packet)
+            
         return False
 
     def send_error(self, conn, msg):
@@ -176,5 +256,5 @@ class Router:
         return
 
 if __name__ == "__main__":
-    router = Router(args.networks)
+    router = Router(args.asn, args.networks)
     router.run()
