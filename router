@@ -64,63 +64,7 @@ class Router:
             self.sockets[network].connect(network)
             self.relations[network] = relation
         return
-
-    def lookup_routes(self, daddr):
-        """ Lookup all valid routes for an address """
-        # TODO
-        outroutes = []
-        return outroutes
-
-    def get_shortest_as_path(self, routes):
-        """ select the route with the shortest AS Path """
-        # TODO
-        outroutes = []
-        return outroutes
-            
-    def get_highest_preference(self, routes):
-        """ select the route with the shortest AS Path """
-        # TODO
-        outroutes = []
-        return outroutes
-         
-    def get_self_origin(self, routes):
-        """ select self originating routes """
-        # TODO
-        outroutes = []
-        return outroutes
-
-    def get_origin_routes(self, routes):
-        """ select origin routes: IGP > EGP > UNK """
-        # TODO
-        outroutes = []
-        return outroutes
-
-    def filter_relationships(self, srcif, routes):
-        """ Don't allow Peer->Peer, Peer->Prov, or Prov->Peer forwards """
-        outroutes = []
-        return outroutes
-
-    def get_route(self, srcif, daddr):
-        """	Select the best route for a given address	"""
-        # TODO
-        peer = None
-        routes = lookup_routers(daddr)
-        # Rules go here
-        if routes:
-            # 1. Highest Preference
-            routes = self.get_highest_preference(routes)
-            # 2. Self Origin
-            routes = self.get_self_origin(routes)
-            # 3. Shortest ASPath
-            routes = self.get_shortest_as_path(routes)
-            # 4. IGP > EGP > UNK
-            routes = self.get_origin_routes(routes)
-            # 5. Lowest IP Address
-            # TODO
-            # Final check: enforce peering relationships
-            routes = self.filter_relationships(srcif, routes)
-        return self.sockets[peer] if peer else None
-
+    
     def apply_subnetmask(self, destination, netmask):
         """	applies the subnet mask to the destination ip """
         destination_segments = destination.split('.')
@@ -134,23 +78,142 @@ class Router:
         ip = ip[0:-1]
         return ip
 
-    def forward(self, srcif, packet):
-        """	Forward a data packet	"""
-        # check every row in the routing table
+    def count_matching_segment(self, ip1, ip2):
+        """ counts the number of matching segments in two ip adresses """
+        ip1_segments = ip1.split('.')
+        ip2_segments = ip2.split('.')
+        count = 0
+        for i in range(len(ip1_segments)):
+            if ip1_segments[i] == ip2_segments[i]:
+                count += 1
+        return count
+
+    def lookup_routes(self, daddr):
+        """ Lookup all valid routes for an address """
+        matching_routes = []
+        # go thorugh every row in the routing table
         for row in self.routes:
             # apply the subnetmask to the destination ip
-            ip = self.apply_subnetmask(packet[DEST], row[NMSK])
-            # if we know which neighbor to forward this packet to
-            if ip == row[NTWK]:
-                # get the neighbor ip
-                neighbor = row[PEER]
-                # get the socket for this neighbor
-                socket = self.sockets[neighbor]
-                socket.send(json.dumps(packet).encode())
-                if DEBUG:
-                    print('FORWARD TO %s: %s' % (neighbor, packet))
-                return True
-        return False
+            masked_ip = self.apply_subnetmask(daddr, row[NMSK])
+            # if the masked ip matches the ip in the routing table add the row to the matching rows
+            if masked_ip == row[NTWK]:
+                matching_routes.append(row)
+        return matching_routes
+        # longest = float('-inf')
+        # # go through every row in the matching destination networks to find the longest matching segments count
+        # for row in matching_routes:
+        #     longest = max(longest, self.count_matching_segment(daddr, row[NTWK]))
+        # outroutes = []
+        # # go through every row in the matching destination networks and add the ones with the longest 
+        # # prefix match to the outroutes
+        # for row in matching_routes:
+        #     if self.count_matching_segment(daddr, row[NTWK]) == longest:
+        #         outroutes.append(row)
+        # return outroutes
+
+    def get_shortest_as_path(self, routes):
+        """ select the route with the shortest AS Path """
+        outroutes = []
+        shortest_length = float('inf')
+        # go thorugh every row in the given routing table and find the minimum AS path
+        for row in routes:
+            shortest_length = min(shortest_length, len(row[APTH]))
+        # go through every row in the given routing table and add the ones with shortest AS path to the list
+        for row in routes:
+            if len(row[APTH]) == shortest_length:
+                outroutes.append(row)
+        return outroutes
+            
+    def get_highest_preference(self, routes):
+        """ select the route with the highest local preference """
+        highest_pref = float('-inf')
+        for row in routes:
+            highest_pref = max(highest_pref, row[LPRF])
+        outroutes = []
+        for row in routes:
+            if row[LPRF] == highest_pref:
+                outroutes.append(row)
+        return outroutes
+         
+    def get_self_origin(self, routes):
+        """ select self originating routes """
+        outroutes = []
+        for row in routes:
+            if row[SORG]:
+                outroutes.append(row)
+        if len(outroutes) > 0:
+            return outroutes
+        return routes
+
+    def get_origin_routes(self, routes):
+        """ select origin routes: IGP > EGP > UNK """
+        best_origin = 'UNK'
+        for row in routes:
+            if best_origin == 'UNK' and row[ORIG] == 'EGP':
+                best_origin = 'EGP'
+            elif best_origin == 'EGP' and row[ORIG] == 'IGP':
+                best_origin = 'IGP'
+        outroutes = []
+        for row in routes:
+            if row[ORIG] == best_origin:
+                outroutes.append(row)
+        return outroutes
+    
+    def compare_ip(self, ip1, ip2):
+        """ compares to ip adresses """
+        ip1_segments = ip1.split('.')
+        ip2_segments = ip2.split('.')
+        for i in range(len(ip1_segments)):
+            value1 = int(ip1_segments[i])
+            value2 = int(ip1_segments[i])
+            if value1 != value2:
+                return value1 - value2
+        return 0
+    
+    def get_lowest_ip(self, routes):
+        """ select lowest ip """
+        outroutes = []
+        min_ip = routes[0][PEER]
+        for row in routes:
+            self.compare_ip(row[PEER], min_ip) < 0
+            min_ip = row[PEER]
+        for row in routes:
+            if row[PEER] == min_ip:
+                outroutes.append(row)
+        return outroutes
+
+    def filter_relationships(self, srcif, routes):
+        """ Don't allow Peer->Peer, Peer->Prov, or Prov->Peer forwards """
+        return routes
+
+    def get_route(self, srcif, daddr):
+        """	Select the best route for a given address	"""
+        routes = self.lookup_routes(daddr)
+        # 1. Highest Preference
+        routes = self.get_highest_preference(routes)
+        # 2. Self Origin
+        routes = self.get_self_origin(routes)
+        # 3. Shortest ASPath
+        routes = self.get_shortest_as_path(routes)
+        # 4. IGP > EGP > UNK
+        routes = self.get_origin_routes(routes)
+        # 5. Lowest IP Address
+        routes = self.get_lowest_ip(routes)
+        # Final check: enforce peering relationships
+        routes = self.filter_relationships(srcif, routes)
+        if routes:
+            return routes[0][PEER]
+        return None
+
+    def forward(self, srcif, packet):
+        peer = self.get_route(srcif, packet[DEST])
+        if peer is None:
+            return False
+        socket = self.sockets[peer]
+        socket.send(json.dumps(packet).encode())
+        if DEBUG:
+            print('FORWARD TO %s: %s' % (peer, packet))
+        return True
 
     def coalesce(self):
         """	coalesce any routes that are right next to each other	"""
