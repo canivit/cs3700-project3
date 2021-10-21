@@ -98,18 +98,19 @@ class Router:
             # if the masked ip matches the ip in the routing table add the row to the matching rows
             if masked_ip == row[NTWK]:
                 matching_routes.append(row)
-        return matching_routes
-        # longest = float('-inf')
-        # # go through every row in the matching destination networks to find the longest matching segments count
-        # for row in matching_routes:
-        #     longest = max(longest, self.count_matching_segment(daddr, row[NTWK]))
-        # outroutes = []
-        # # go through every row in the matching destination networks and add the ones with the longest 
-        # # prefix match to the outroutes
-        # for row in matching_routes:
-        #     if self.count_matching_segment(daddr, row[NTWK]) == longest:
-        #         outroutes.append(row)
-        # return outroutes
+
+        # longest prefix match
+        longest = float('-inf')
+        # go through every row in the possible routes to find the longest matching segments count
+        for row in matching_routes:
+            longest = max(longest, self.count_matching_segment(daddr, row[NTWK]))
+        outroutes = []
+        # go through every row in the possible routes and add the ones with the longest 
+        # prefix match to the outroutes
+        for row in matching_routes:
+            if self.count_matching_segment(daddr, row[NTWK]) == longest:
+                outroutes.append(row)
+        return outroutes
 
     def get_shortest_as_path(self, routes):
         """ select the route with the shortest AS Path """
