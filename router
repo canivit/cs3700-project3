@@ -165,7 +165,7 @@ class Router:
         ip2_segments = ip2.split('.')
         for i in range(len(ip1_segments)):
             value1 = int(ip1_segments[i])
-            value2 = int(ip1_segments[i])
+            value2 = int(ip2_segments[i])
             if value1 != value2:
                 return value1 - value2
         return 0
@@ -181,10 +181,19 @@ class Router:
             if row[PEER] == min_ip:
                 outroutes.append(row)
         return outroutes
-
+    
     def filter_relationships(self, srcif, routes):
         """ Don't allow Peer->Peer, Peer->Prov, or Prov->Peer forwards """
-        return routes
+        # allow if the source router is a customer
+        if self.relations[srcif] == CUST:
+            return routes
+        outroutes = []
+        for row in routes:
+            next_hop = row[PEER]
+            # allow if the destination router (next hop for this packet) is a customer
+            if self.relations[next_hop] == CUST:
+                outroutes.append(row)
+        return outroutes
 
     def get_route(self, srcif, daddr):
         """	Select the best route for a given address	"""
@@ -206,13 +215,15 @@ class Router:
         return None
 
     def forward(self, srcif, packet):
-        peer = self.get_route(srcif, packet[DEST])
-        if peer is None:
+        # get the next hop for this packet
+        next_hop = self.get_route(srcif, packet[DEST])
+        # if there is no route, return False
+        if next_hop is None:
             return False
-        socket = self.sockets[peer]
+        socket = self.sockets[next_hop]
         socket.send(json.dumps(packet).encode())
         if DEBUG:
-            print('FORWARD TO %s: %s' % (peer, packet))
+            print('FORWARD TO %s: %s' % (next_hop, packet))
         return True
 
     def coalesce(self):
@@ -222,6 +233,18 @@ class Router:
 
     def get_router_ip(self, ip):
         return ip[0:-1] + '1'
+
+    def is_update_legal(self, saddr, daddr):
+        # do not send update to the host who sent us the update
+        if saddr == daddr:
+            return False
+        # Update received from a customer: send updates to all other neighbors
+        if self.relations[saddr] == CUST:
+            return True
+        # Update received from a peer or a provider: only send updates to your customers
+        if self.relations[daddr] == CUST:
+            return True
+        return False
 
     def update(self, srcif, packet):
         """	handle update packets	"""
@@ -237,10 +260,11 @@ class Router:
             print('ROUTING TABLE: %s' % self.routes)
 
         # send copies of the announcement to neighboring routers
+        saddr = packet[SRCE]
         neighbors = self.sockets.keys()
         for neighbor in neighbors:
-            # dont't send an announcement to the neighbor who sent this to us          
-            if(neighbor != packet[SRCE]):
+            # check if sending this update to this neighbor is legal         
+            if self.is_update_legal(saddr, neighbor):
                 cp = copy.deepcopy(packet)
                 # change the source and destination fields
                 cp[SRCE] = self.get_router_ip(neighbor)
@@ -261,7 +285,7 @@ class Router:
 
         # update the routing table
         filtered = []
-        peer = packet[SRCE]
+        saddr = packet[SRCE]
         # go through every row in the routing table
         for route_row in self.routes:
             match = False
@@ -270,7 +294,7 @@ class Router:
                 # check for a match
                 match = route_row[NTWK] == revoke_row[NTWK]
                 match = match and route_row[NMSK] == revoke_row[NMSK]
-                match = match and route_row[PEER] == peer
+                match = match and route_row[PEER] == saddr
                 if match:
                     break
             # add the routing table row into the new routing table if it was not
@@ -282,8 +306,8 @@ class Router:
         # send copies of the revoke to neighboring routers
         neighbors = self.sockets.keys()
         for neighbor in neighbors:
-            # dont't send an announcement to the neighbor who sent this to us
-            if(neighbor != peer):
+            # check if sending this update to this neighbor is legal
+            if self.is_update_legal(saddr, neighbor):
                 # change the source and destination fields
                 packet[SRCE] = self.get_router_ip(neighbor)
                 packet[DEST] = neighbor
@@ -318,37 +342,34 @@ class Router:
     def handle_packet(self, srcif, packet):
         """	dispatches a packet """
         if DEBUG:
-            print('RECEIVED: %s' % packet)
+            print('RECEIVED FROM %s: %s' % (srcif, packet))
         
         type = packet[TYPE]
         # if this packet is route update message
         if type == UPDT:
             return self.update(srcif, packet)
+        # if this packet is data message
         elif type == DATA:
             return self.forward(srcif, packet)
+        # if this packet is table dump message
         elif type == DUMP:
             return self.dump(packet)
+        # if this packet is revoke message
         elif type == RVKE:
             return self.revoke(packet)
         return False
 
-    def send_error(self, conn, msg):
-        daddr = ''
-        # go thorugh every neighbor's socket to find which neighbor 
-        # this socket is connected to
-        for neighbor in self.sockets.keys():
-            if self.sockets[neighbor] == conn:
-                daddr = neighbor
-                break
+    def send_error(self, srcif, msg):
         error_msg = {}
-        error_msg[SRCE] = self.get_router_ip(daddr)
-        error_msg[DEST] = daddr
+        # src ip in the no route package is this router's ip in the given port
+        error_msg[SRCE] = self.get_router_ip(srcif)
+        # dest ip in the no route package is the src ip in the data message we received
+        error_msg[DEST] = msg[SRCE]
         error_msg[TYPE] = NRTE
         error_msg[MESG] = {}
-        conn.send(json.dumps(error_msg).encode())
+        self.sockets[srcif].send(json.dumps(error_msg).encode())
         if DEBUG:
-            print('SEND NO ROUTE TO %s: %s' % (daddr, error_msg))
-
+            print('SEND NO ROUTE TO %s: %s' % (srcif, error_msg))
 
     def run(self):
         while True:
@@ -365,7 +386,7 @@ class Router:
                             srcif = sock
                     msg = json.loads(k)
                     if not self.handle_packet(srcif, msg):
-                        self.send_error(conn, msg)
+                        self.send_error(srcif, msg)
                 else:
                     return
         return
