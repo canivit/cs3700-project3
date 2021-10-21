@@ -173,7 +173,7 @@ class Router:
     def get_lowest_ip(self, routes):
         """ select lowest ip """
         outroutes = []
-        min_ip = routes[0][PEER]
+        min_ip = '255.255.255.255'
         for row in routes:
             self.compare_ip(row[PEER], min_ip) < 0
             min_ip = row[PEER]
@@ -233,6 +233,8 @@ class Router:
         row = copy.deepcopy(packet[MESG])
         row[PEER] = packet[SRCE]
         self.routes.append(row)
+        if DEBUG:
+            print('ROUTING TABLE: %s' % self.routes)
 
         # send copies of the announcement to neighboring routers
         neighbors = self.sockets.keys()
@@ -248,13 +250,49 @@ class Router:
                 socket = self.sockets[neighbor]
                 socket.send(json.dumps(cp).encode())
                 if DEBUG:
-                    print('ANNOUNCE UPDATE TO %s: %s' % (neighbor ,cp))
+                    print('ANNOUNCE UPDATE TO %s: %s' % (neighbor, cp))
 
         return True
     
     def revoke(self, packet):
         """	handle revoke packets	"""
-        # TODO
+        # save it for later use
+        self.updates.append(packet)
+
+        # update the routing table
+        filtered = []
+        peer = packet[SRCE]
+        # go through every row in the routing table
+        for route_row in self.routes:
+            match = False
+            # go thorugh every row in the revoke message
+            for revoke_row in packet[MESG]:
+                # check for a match
+                match = route_row[NTWK] == revoke_row[NTWK]
+                match = match and route_row[NMSK] == revoke_row[NMSK]
+                match = match and route_row[PEER] == peer
+                if match:
+                    break
+            # add the routing table row into the new routing table if it was not
+            # in the revoke message
+            if not match:
+                filtered.append(route_row)
+        self.routes = filtered
+
+        # send copies of the revoke to neighboring routers
+        neighbors = self.sockets.keys()
+        for neighbor in neighbors:
+            # dont't send an announcement to the neighbor who sent this to us
+            if(neighbor != peer):
+                # change the source and destination fields
+                packet[SRCE] = self.get_router_ip(neighbor)
+                packet[DEST] = neighbor
+                socket = self.sockets[neighbor]
+                socket.send(json.dumps(packet).encode())
+                if DEBUG:
+                    print('ANNOUNCE REVOKE TO %s: %s' % (neighbor, packet))
+
+
         return True
 
     def dump(self, packet):
@@ -290,13 +328,27 @@ class Router:
             return self.forward(srcif, packet)
         elif type == DUMP:
             return self.dump(packet)
-            
+        elif type == RVKE:
+            return self.revoke(packet)
         return False
 
     def send_error(self, conn, msg):
-        """ Send a no_route error message """
-        # TODO
-        return
+        daddr = ''
+        # go thorugh every neighbor's socket to find which neighbor 
+        # this socket is connected to
+        for neighbor in self.sockets.keys():
+            if self.sockets[neighbor] == conn:
+                daddr = neighbor
+                break
+        error_msg = {}
+        error_msg[SRCE] = self.get_router_ip(daddr)
+        error_msg[DEST] = daddr
+        error_msg[TYPE] = NRTE
+        error_msg[MESG] = {}
+        conn.send(json.dumps(error_msg).encode())
+        if DEBUG:
+            print('SEND NO ROUTE TO %s: %s' % (daddr, error_msg))
+
 
     def run(self):
         while True:
