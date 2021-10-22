@@ -48,6 +48,7 @@ class Router:
     updates = None
     relations = None
     sockets = None
+    aggregated_routes = None
 
     def __init__(self, asn, networks):
         self.asn = asn
@@ -55,6 +56,7 @@ class Router:
         self.updates = []
         self.relations = {}
         self.sockets = {}
+        self.aggregated_routes = []
         for relationship in networks:
             network, relation = relationship.split("-")
             if DEBUG: 
@@ -79,13 +81,24 @@ class Router:
         return ip
 
     def ip_to_binary_string(self, ip):
+        """ converts the 32 bit dotted ip notation into binary representation"""
         ip_segments = ip.split('.')
         bits = ''
         for segment in ip_segments:
             bits += bin(int(segment) + 256)[3:]
         return bits
 
+    def binary_string_to_ip(self, bits):
+        """ converts a 32-bit binary representation of a 32-bit ip into dotted notation"""
+        ip = ''
+        for i in range(0, len(bits), 8):
+            ip += str(int(bits[i : i + 8], 2))
+            ip += '.'
+        ip = ip[0:-1]
+        return ip
+
     def prefix_length(self, ip):
+        """ counts the number of ones in the binary representation of an ip adress """
         return self.ip_to_binary_string(ip).count('1')
 
     def longest_prefix(self, routes, daddr):
@@ -232,10 +245,57 @@ class Router:
             print('FORWARD TO %s: %s' % (next_hop, packet))
         return True
 
-    def aggregate(self):
+    def create_netmask(self, length):
+        """creates a cidr subnetmask with the given bit length"""
+        ip_bits = ''
+        for i in range(length):
+            ip_bits += '1'
+        for i in range(32 - length):
+            ip_bits += '0'
+        return self.binary_string_to_ip(ip_bits)
+
+    def aggregate_routes(self, route1, route2):
+        """aggregate two routes into one route, if possible"""
+        for key in route1:
+            if key != NTWK and route1[key] != route2[key]:
+                return None
+        prefix_length = self.prefix_length(route1[NMSK])
+        route1_ip_bits = self.ip_to_binary_string(route1[NTWK])
+        route2_ip_bits = self.ip_to_binary_string(route2[NTWK])
+        if route1_ip_bits[0 : prefix_length - 1] != route2_ip_bits[0 : prefix_length - 1]:
+            return None
+        if route1_ip_bits[prefix_length - 1] == route2_ip_bits[prefix_length - 1]:
+            return None
+        if route1_ip_bits[prefix_length :] != route2_ip_bits[prefix_length :]:
+            return None
+        new_route = copy.deepcopy(route1)
+        new_ip_bits = route1_ip_bits[0 : prefix_length - 1]
+        new_ip_bits += '0'
+        new_ip_bits += route1_ip_bits[prefix_length :]
+        new_ip = self.binary_string_to_ip(new_ip_bits)
+        new_route[NTWK] = new_ip
+        new_route[NMSK] = self.create_netmask(prefix_length - 1)
+        return new_route
+
+    def coalesce(self):
         """	coalesce any routes that are right next to each other	"""
-        # TODO (this is the most difficult task, save until last)
-        return False
+        size = len(self.routes)
+        aggregated_routes = []
+        for i in range(0, size):
+            for j in range(i + 1, size):
+                route1 = self.routes[i]
+                route2 = self.routes[j]
+                new_route = self.aggregate_routes(route1, route2)
+                if new_route is not None:
+                    aggregated_routes.append((route1, route2, new_route))
+        for row in aggregated_routes:
+            self.routes.remove(row[0])
+            self.routes.remove(row[1])
+            self.routes.append(row[2])
+        if len(aggregated_routes) > 0:
+            self.aggregated_routes += aggregated_routes
+            return self.coalesce()
+        return         
 
     def get_router_ip(self, ip):
         return ip[0:-1] + '1'
@@ -262,6 +322,7 @@ class Router:
         row = copy.deepcopy(packet[MESG])
         row[PEER] = packet[SRCE]
         self.routes.append(row)
+        self.coalesce()
         if DEBUG:
             print('ROUTING TABLE: %s' % self.routes)
 
@@ -290,7 +351,7 @@ class Router:
         self.updates.append(packet)
 
         # update the routing table
-        filtered = []
+        to_remove = []
         saddr = packet[SRCE]
         # go through every row in the routing table
         for route_row in self.routes:
@@ -302,12 +363,9 @@ class Router:
                 match = match and route_row[NMSK] == revoke_row[NMSK]
                 match = match and route_row[PEER] == saddr
                 if match:
-                    break
-            # add the routing table row into the new routing table if it was not
-            # in the revoke message
-            if not match:
-                filtered.append(route_row)
-        self.routes = filtered
+                    to_remove.append(route_row)
+        for route in to_remove:
+            self.routes.remove(route)
 
         # send copies of the revoke to neighboring routers
         neighbors = self.sockets.keys()
