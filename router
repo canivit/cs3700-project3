@@ -78,12 +78,15 @@ class Router:
         ip = ip[0:-1]
         return ip
 
-    def netmask_length_cidr(self, netmask):
-        netmask_segments = netmask.split('.')
-        length = 0
-        for segment in netmask_segments:
-            length += bin(int(segment)).count('1')
-        return length
+    def ip_to_binary_string(self, ip):
+        ip_segments = ip.split('.')
+        bits = ''
+        for segment in ip_segments:
+            bits += bin(int(segment) + 256)[3:]
+        return bits
+
+    def prefix_length(self, ip):
+        return self.ip_to_binary_string(ip).count('1')
 
     def longest_prefix(self, routes, daddr):
         """ longest prefix match """
@@ -91,12 +94,12 @@ class Router:
         longest = 0
         # go through every row in the possible routes to find the longest bit netmask
         for row in routes:
-            longest = max(longest, self.netmask_length_cidr(row[NMSK]))
+            longest = max(longest, self.prefix_length(row[NMSK]))
         outroutes = []
         # go through every row in the possible routes and add the ones with the longest 
         # prefix match to the outroutes
         for row in routes:
-            if self.netmask_length_cidr(row[NMSK]) == longest:
+            if self.prefix_length(row[NMSK]) == longest:
                 outroutes.append(row)
         return outroutes
 
@@ -229,7 +232,7 @@ class Router:
             print('FORWARD TO %s: %s' % (next_hop, packet))
         return True
 
-    def coalesce(self):
+    def aggregate(self):
         """	coalesce any routes that are right next to each other	"""
         # TODO (this is the most difficult task, save until last)
         return False
