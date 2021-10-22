@@ -78,37 +78,37 @@ class Router:
         ip = ip[0:-1]
         return ip
 
-    def count_matching_segment(self, ip1, ip2):
-        """ counts the number of matching segments in two ip adresses """
-        ip1_segments = ip1.split('.')
-        ip2_segments = ip2.split('.')
-        count = 0
-        for i in range(len(ip1_segments)):
-            if ip1_segments[i] == ip2_segments[i]:
-                count += 1
-        return count
+    def netmask_length_cidr(self, netmask):
+        netmask_segments = netmask.split('.')
+        length = 0
+        for segment in netmask_segments:
+            length += bin(int(segment)).count('1')
+        return length
+
+    def longest_prefix(self, routes, daddr):
+        """ longest prefix match """
+        outroutes = []
+        longest = 0
+        # go through every row in the possible routes to find the longest bit netmask
+        for row in routes:
+            longest = max(longest, self.netmask_length_cidr(row[NMSK]))
+        outroutes = []
+        # go through every row in the possible routes and add the ones with the longest 
+        # prefix match to the outroutes
+        for row in routes:
+            if self.netmask_length_cidr(row[NMSK]) == longest:
+                outroutes.append(row)
+        return outroutes
 
     def lookup_routes(self, daddr):
         """ Lookup all valid routes for an address """
-        matching_routes = []
+        outroutes = []
         # go thorugh every row in the routing table
         for row in self.routes:
             # apply the subnetmask to the destination ip
             masked_ip = self.apply_subnetmask(daddr, row[NMSK])
             # if the masked ip matches the ip in the routing table add the row to the matching rows
             if masked_ip == row[NTWK]:
-                matching_routes.append(row)
-
-        # longest prefix match
-        longest = float('-inf')
-        # go through every row in the possible routes to find the longest matching segments count
-        for row in matching_routes:
-            longest = max(longest, self.count_matching_segment(daddr, row[NTWK]))
-        outroutes = []
-        # go through every row in the possible routes and add the ones with the longest 
-        # prefix match to the outroutes
-        for row in matching_routes:
-            if self.count_matching_segment(daddr, row[NTWK]) == longest:
                 outroutes.append(row)
         return outroutes
 
@@ -199,6 +199,8 @@ class Router:
     def get_route(self, srcif, daddr):
         """	Select the best route for a given address	"""
         routes = self.lookup_routes(daddr)
+        # longest prefix match
+        routes = self.longest_prefix(routes, daddr)
         # 1. Highest Preference
         routes = self.get_highest_preference(routes)
         # 2. Self Origin
