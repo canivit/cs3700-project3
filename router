@@ -2,8 +2,8 @@
 
 import argparse, socket, json, select, copy
 
-DEBUG = True
-#DEBUG = False
+#DEBUG = True
+DEBUG = False
 
 parser = argparse.ArgumentParser(description='route packets')
 parser.add_argument('asn', type=int, help="AS Number")
@@ -38,6 +38,9 @@ SORG = "selfOrigin"
 CUST = "cust"
 PEER = "peer"
 PROV = "prov"
+
+LEFT = 'left'
+RIGHT = 'right'
 
 
 ##########################################################################################
@@ -242,7 +245,7 @@ class Router:
         socket = self.sockets[next_hop]
         socket.send(json.dumps(packet).encode())
         if DEBUG:
-            print('FORWARD TO %s: %s' % (next_hop, packet))
+            print('FORWARD TO %s:\n%s' % (next_hop, json.dumps(packet, indent = 2)))
         return True
 
     def create_netmask(self, length):
@@ -257,7 +260,7 @@ class Router:
     def aggregate_routes(self, route1, route2):
         """aggregate two routes into one route, if possible"""
         for key in route1:
-            if key != NTWK and route1[key] != route2[key]:
+            if key != NTWK and key != LEFT and key != RIGHT and route1[key] != route2[key]:
                 return None
         prefix_length = self.prefix_length(route1[NMSK])
         route1_ip_bits = self.ip_to_binary_string(route1[NTWK])
@@ -275,6 +278,8 @@ class Router:
         new_ip = self.binary_string_to_ip(new_ip_bits)
         new_route[NTWK] = new_ip
         new_route[NMSK] = self.create_netmask(prefix_length - 1)
+        new_route[LEFT] = route1
+        new_route[RIGHT] = route2
         return new_route
 
     def coalesce(self):
@@ -293,7 +298,6 @@ class Router:
             self.routes.remove(row[1])
             self.routes.append(row[2])
         if len(aggregated_routes) > 0:
-            self.aggregated_routes += aggregated_routes
             return self.coalesce()
         return         
 
@@ -321,10 +325,12 @@ class Router:
         # update the routing table
         row = copy.deepcopy(packet[MESG])
         row[PEER] = packet[SRCE]
+        row[LEFT] = None
+        row [RIGHT] = None
         self.routes.append(row)
         self.coalesce()
         if DEBUG:
-            print('ROUTING TABLE: %s' % self.routes)
+            print('ROUTING TABLE:\n%s' % json.dumps(self.routes, indent = 2))
 
         # send copies of the announcement to neighboring routers
         saddr = packet[SRCE]
@@ -341,10 +347,43 @@ class Router:
                 socket = self.sockets[neighbor]
                 socket.send(json.dumps(cp).encode())
                 if DEBUG:
-                    print('ANNOUNCE UPDATE TO %s: %s' % (neighbor, cp))
-
+                    print('ANNOUNCE UPDATE TO %s:\n%s' % (neighbor, json.dumps(cp, indent = 2)))
         return True
     
+    def check_revoke_match(sef, route, revoke, saddr):
+        """ check if the given route macthes to the revoked route"""
+        match = route[NTWK] == revoke[NTWK]
+        match = match and route[NMSK] == revoke[NMSK]
+        match = match and route[PEER] == saddr
+        return match
+
+    def check_child_revoke(self, route, revoke, saddr):
+        """ recursively goes through each child of the aggregated route to
+        check if the route to revoke is in this tree"""
+        if route is None:
+            return False
+        if self.check_revoke_match(route, revoke, saddr):
+            return True
+        found = self.check_child_revoke(route[LEFT], revoke, saddr)
+        return found or self.check_child_revoke(route[RIGHT], revoke, saddr)
+
+    def revoke_aggregated_routes(self, route, revoke, saddr, to_remove):
+        """ recursively goes through each child of the aggregated route to complete disaggregation """
+        # if right child has the route to revoke, remove this route, add the left child to routing table,
+        # and recurse on the right child
+        if self.check_child_revoke(route[RIGHT], revoke, saddr):
+            to_remove.append(route)
+            self.routes.append(route[LEFT])
+            return self.revoke_aggregated_routes(route[RIGHT], revoke, saddr, to_remove)
+        # if left child has the route to revoke, remove this route, add the right child to routing table,
+        # and recurse on the left child
+        elif self.check_child_revoke(route[LEFT], revoke, saddr):
+            to_remove.append(route)
+            self.routes.append(route[RIGHT])
+            return self.revoke_aggregated_routes(route[LEFT], revoke, saddr, to_remove)
+        else:
+            return
+
     def revoke(self, packet):
         """	handle revoke packets	"""
         # save it for later use
@@ -358,14 +397,16 @@ class Router:
             match = False
             # go thorugh every row in the revoke message
             for revoke_row in packet[MESG]:
-                # check for a match
-                match = route_row[NTWK] == revoke_row[NTWK]
-                match = match and route_row[NMSK] == revoke_row[NMSK]
-                match = match and route_row[PEER] == saddr
-                if match:
+                # check for a match                
+                if self.check_revoke_match(route_row, revoke_row, saddr):
                     to_remove.append(route_row)
+                self.revoke_aggregated_routes(route_row, revoke_row, saddr, to_remove)
         for route in to_remove:
-            self.routes.remove(route)
+            if route in self.routes:
+                self.routes.remove(route)
+
+        if DEBUG:
+            print('ROUTING TABLE:\n%s' % json.dumps(self.routes, indent = 2))
 
         # send copies of the revoke to neighboring routers
         neighbors = self.sockets.keys()
@@ -378,9 +419,7 @@ class Router:
                 socket = self.sockets[neighbor]
                 socket.send(json.dumps(packet).encode())
                 if DEBUG:
-                    print('ANNOUNCE REVOKE TO %s: %s' % (neighbor, packet))
-
-
+                    print('ANNOUNCE REVOKE TO %s:\n%s' % (neighbor, json.dumps(packet, indent = 2)))
         return True
 
     def dump(self, packet):
@@ -400,13 +439,13 @@ class Router:
         socket = self.sockets[packet[SRCE]]
         socket.send(json.dumps(table_message).encode())
         if DEBUG:
-            print('SEND TABLE: %s' % table_message)
+            print('SEND TABLE:\n%s' % json.dumps(table_message, indent = 2))
         return True
 
     def handle_packet(self, srcif, packet):
         """	dispatches a packet """
         if DEBUG:
-            print('RECEIVED FROM %s: %s' % (srcif, packet))
+            print('RECEIVED FROM %s:\n%s' % (srcif, json.dumps(packet, indent = 2)))
         
         type = packet[TYPE]
         # if this packet is route update message
@@ -433,7 +472,7 @@ class Router:
         error_msg[MESG] = {}
         self.sockets[srcif].send(json.dumps(error_msg).encode())
         if DEBUG:
-            print('SEND NO ROUTE TO %s: %s' % (srcif, error_msg))
+            print('SEND NO ROUTE TO %s:\n %s' % (srcif, json.dumps(error_msg, indent = 2)))
 
     def run(self):
         while True:
